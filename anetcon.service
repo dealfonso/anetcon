@@ -1,0 +1,12 @@
+[Unit]
+Description=ANETCON - Auditing Network Connections of OpenStack routers
+After=neutron-l3-agent.service neutron-linuxbridge-agent.service neutron-server.service
+
+[Service]
+Type=simple
+PIDFile=/var/run/anetcon.pid
+ExecStart=/usr/sbin/anetcon.sh
+ExecStop=/bin/kill $MAINPID
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+/var/log/anetcon/anetcon*.log
+{
+        rotate 100
+        daily
+        missingok
+        notifempty
+        create 0640 syslog adm
+        compress
+        delaycompress
+        sharedscripts
+        postrotate
+                systemctl restart rsyslog.service
+        endscript
+}
