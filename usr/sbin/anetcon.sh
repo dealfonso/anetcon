@@ -1,15 +1,29 @@
 #!/bin/bash
 
+#
+# Default values for the configuration files
+#
+
+# DEBUG: anything different than empty value sets the debug mode
 DEBUG=
+# Space separated list of id routers to be monitorized (id can be obtained from openstack router list)
 ROUTERS=( )
+# Monitorization period to check if the iptables routes have been modified
 PERIOD=60
+# List of networks to be monitorized for each router (the syntax is "<router id>" "<space separated list of network using cidr notation>")
 NETS=( )
+# File in which the log will appear (appart from stdout)
 LOGFILE=/var/log/anetcon/anetcon.log
 
-# Las iptables del router que se esta analizando
+# The content of the iptables from the router that is being analized
 IPTABLES_ROUTER=
+# The networks that should be monitorized for the router that is being analized
 EXPECTED_NETS=( )
+# The current router that is being analized
+ROUTER_ID=
+ROUTER_NS=
 
+# Some utility functions
 function p_info {
         local TS=$(date +%F_%T | tr ':' '.')
         echo "$TS - [info] - $@" | tee -a "$LOGFILE"
@@ -33,59 +47,69 @@ if [ -e /etc/anetcon.conf ]; then
         fi
 fi
 
-# Carga las iptables de un router, para que esten listas para analizar
+function _iptables {
+        if [ "$ROUTER_ID" == "" ]; then
+                iptables "$@"
+        else
+                ip netns $ROUTER_NS exec iptables "$@"
+        fi
+}
+
+# Load the iptables rules for one router, in IPTABLES_ROUTER var, and the EXPECTED_NETS for that router
 function load_rules {
 
         p_debug "loading rules for router $1"
 
-        local NS="qrouter-$1"
-        local IPTABLES="$(ip netns exec $NS iptables -t nat -S 2> /dev/null)"
+        ROUTER_ID="$1"
+        ROUTER_NS="qrouter-$ROUTER_ID"
+        # local IPTABLES="$(ip netns exec $ROUTER_NS iptables -t nat -S 2> /dev/null)"
+        local IPTABLES="$(_iptables -t nat -S 2> /dev/null)"
 
         if [ $? -ne 0 ]; then
-                p_error "failed to load rules for router $1"
+                p_error "failed to load rules for router $ROUTER_ID"
 
                 IPTABLES_ROUTER=
                 EXPECTED_NETS=( )
                 return 1
         fi
 
-        p_debug "rules for router $1 successfully loaded"
+        p_debug "rules for router $ROUTER_ID successfully loaded"
         IPTABLES_ROUTER="$(echo "$IPTABLES" | grep '\[ANETCON\]')"
-        EXPECTED_NETS=( $(get_nets "$ROUTER") )
+        EXPECTED_NETS=( $(get_nets) )
         return 0
 }
 
-# Obtiene la lista de redes NAT que se quieren monitorizar para un router
+# Obtains the list of networks to be monitorized for one router
 function get_nets {
-        local READNETS= ROUTER="$1" VALIDNETS=
+        local READNETS= VALIDNETS=
         for N in "${NETS[@]}"; do
                 if [ "$READNETS" != "" ]; then
-
-                        p_debug "found networks $N to monitor in router $ROUTER"
+                        p_debug "found networks $N to monitor in router $ROUTER_ID"
 
                         VALIDNETS="$N"
                         break
                 fi
-                if [ "$N" == "$ROUTER" ]; then
+                if [ "$N" == "$ROUTER_ID" ]; then
                         READNETS=1
                 fi
         done
         echo "$VALIDNETS"
 }
-# Borra las reglas del router que se esta analizando actualmente (debe haberse llamado antes a load_rules)
+
+# Deletes the iptables rules associated to one router (this funcion relies on a previous call to load_rules)
 function wipe_rules {
-        local NS="qrouter-$1"
         local RULE
         local CMD
         local RULES
 
-        p_debug "wiping rules for router $1"
+        p_debug "wiping rules for router $ROUTER_ID"
 
         # Remove all rules for that router (those loaded by load_rules)
         RULES="$(echo "$IPTABLES_ROUTER" | sed 's/^-A/-D/g')"
         while read RULE; do
                 if [ "$RULE" != "" ]; then
-                        CMD=( ip netns exec "$NS" iptables -t nat )
+                        # CMD=( ip netns exec "$ROUTER_NS" iptables -t nat )
+                        CMD=( _iptables -t nat )
                         while IFS= read -r -d ''; do
                                 CMD+=("$REPLY")
                         done < <(xargs printf '%s\0' <<< "$RULE")
@@ -94,15 +118,12 @@ function wipe_rules {
         done <<< "$RULES"
 }
 
-# Crea las reglas para el router
+# Sets the iptables to start logging the start of new connections (this function relies on a previous call to load_rules)
 function setup_rules {
-        local ROUTER="$1"
+        wipe_rules
 
-        wipe_rules "$ROUTER"
+        p_info "creating rules for router $ROUTER_ID"
 
-        p_info "creating rules for router $ROUTER"
-
-        local NS="qrouter-$ROUTER"
         local SOURCE=( )
         local S
         local NET
@@ -116,13 +137,15 @@ function setup_rules {
         fi
 
         # Create the new rules
-        ip netns exec $NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
+        # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
+        _iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
         if [ $? -ne 0 ]; then
                 return 1
         fi
 
         for S in "${SOURCE[@]}"; do
-                ip netns exec $NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
+                # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
+                _iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
                 if [ $? -ne 0 ]; then
                         return 1
                 fi
@@ -130,14 +153,14 @@ function setup_rules {
         return 0
 }
 
+# Function that checks that the rules for one router have been properly set (and they have not been changed)
+#       * at this point the rules are not inspected in depth; the only criteria is to have the appropriate amount of rules, depending on the number of networks to monitor
 function check_rules {
-        local ROUTER="$1"
-        local NS="qrouter-$ROUTER"
         local SOURCE=( )
         local S
         local NET
 
-        p_debug "checking rules for router $ROUTER"
+        p_debug "checking rules for router $ROUTER_ID"
 
         local NETCOUNT="${#EXPECTED_NETS[@]}"
         if ((NETCOUNT == 0)); then
@@ -147,13 +170,13 @@ function check_rules {
         local RULE_COUNT="$(echo "$IPTABLES_ROUTER" | wc -l)"
         local EXPECTED_RULES=$((1 + NETCOUNT))
         if ((RULE_COUNT!=EXPECTED_RULES)); then
-
-                p_debug "number of rules for router $ROUTER is not the expected"
+                p_debug "number of rules for router $ROUTER_ID is not the expected"
                 return 1
         fi
         return 0
 }
 
+# Function that monitors that the routes for each router are fine. If not, the rules for that router are wiped an set back again.
 function monitor_routers {
         local ROUTER
         for ROUTER in ${ROUTERS[@]}; do
@@ -163,41 +186,49 @@ function monitor_routers {
                         p_error "failed to load rules for router $ROUTER"
                         continue
                 fi
-                if ! check_rules "$ROUTER"; then
+                if ! check_rules; then
                         p_error "rules for router $ROUTER have changed... updating"
 
-                        wipe_rules "$ROUTER"
-                        setup_rules "$ROUTER"
+                        wipe_rules
+                        setup_rules
                 fi
         done
 }
 
+# Function that removes any rule for any router (this is intended for finalizing the service)
 function cleanup {
+        local ROUTER
         for ROUTER in ${ROUTERS[@]}; do
                 p_info "cleaning up rules for router $ROUTER"
                 if ! load_rules "$ROUTER"; then
                         p_error "failed to load rules for router $ROUTER"
                         continue
                 fi
-                wipe_rules "$ROUTER"
+                wipe_rules
         done
 }
 
+# Function that adds the rules for any router (this is intended for starting the service)
 function setup {
+        local ROUTER
         for ROUTER in ${ROUTERS[@]}; do
                 p_info "setting up rules for router $ROUTER"
                 if ! load_rules "$ROUTER"; then
                         p_error "failed to load rules for router $ROUTER"
                         continue
                 fi
-                wipe_rules "$ROUTER"
-                setup_rules "$ROUTER"
+                wipe_rules
+                setup_rules
         done
 }
 
+# In case that the application is finalized, call the cleanup function
 trap cleanup EXIT
+
+# Prepare the rules
 setup
 
+# Start monitoring
 while true; do
         monitor_routers
         sleep $PERIOD
