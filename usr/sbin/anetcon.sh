@@ -7,7 +7,7 @@
 # DEBUG: anything different than empty value sets the debug mode
 DEBUG=
 # Space separated list of id routers to be monitorized (id can be obtained from openstack router list)
-ROUTERS=( )
+ROUTERS=( default )
 # Monitorization period to check if the iptables routes have been modified
 PERIOD=60
 # List of networks to be monitorized for each router (the syntax is "<router id>" "<space separated list of network using cidr notation>")
@@ -26,18 +26,41 @@ ROUTER_NS=
 # Some utility functions
 function p_info {
         local TS=$(date +%F_%T | tr ':' '.')
-        echo "$TS - [info] - $@" | tee -a "$LOGFILE"
+        local OUTPUT="$@"
+        echo "$TS - [info] - $OUTPUT"
+        [ "$LOGFILE" != "" ] && echo "$TS - [info] - $OUTPUT" >> "$LOGFILE"
 }
 
 function p_error {
         local TS=$(date +%F_%T | tr ':' '.')
-        echo "$TS - [error] - $@" >&2 | cat - 2>&1 | tee -a "$LOGFILE"
+        local OUTPUT="$@"
+        echo "$TS - [error] - $OUTPUT" >&2
+        [ "$LOGFILE" != "" ] && echo "$TS - [error] - $OUTPUT" >> "$LOGFILE"
 }
 
 function p_debug {
         [ "$DEBUG" == "" ] && return 0
         local TS=$(date +%F_%T | tr ':' '.')
-        echo "$TS - [debug] - $@" >&2  | cat - 2>&1 | tee -a "$LOGFILE"
+        local OUTPUT="$@"
+        echo "$TS - [debug] - $OUTPUT" >&2
+        [ "$LOGFILE" != "" ] && echo "$TS - [debug] - $OUTPUT" >> "$LOGFILE"
+}
+
+function p_debug_in {
+        [ "$DEBUG" == "" ] && return 0
+        local TS=$(date +%F_%T | tr ':' '.')
+        local OUTPUT="$(cat - 2>&1)"
+        [ "$OUTPUT" == "" ] && return 0
+        echo "$TS - [debug] - $OUTPUT" >&2
+        [ "$LOGFILE" != "" ] && echo "$TS - [debug] - $OUTPUT" >> "$LOGFILE"
+}
+
+function p_error_in {
+        local TS=$(date +%F_%T | tr ':' '.')
+        local OUTPUT="$(cat - 2>&1)"
+        [ "$OUTPUT" == "" ] && return 0
+        echo "$TS - [error] - $OUTPUT" >&2
+        [ "$LOGFILE" != "" ] && echo "$TS - [error] - $OUTPUT" >> "$LOGFILE"
 }
 
 if [ -e /etc/anetcon.conf ]; then
@@ -50,20 +73,27 @@ fi
 function _iptables {
         if [ "$ROUTER_ID" == "" ]; then
                 iptables "$@"
+                return $?
         else
                 ip netns $ROUTER_NS exec iptables "$@"
+                return $?
         fi
 }
 
 # Load the iptables rules for one router, in IPTABLES_ROUTER var, and the EXPECTED_NETS for that router
 function load_rules {
-
         p_debug "loading rules for router $1"
 
         ROUTER_ID="$1"
-        ROUTER_NS="qrouter-$ROUTER_ID"
+        if [ "$ROUTER_ID" == "default" ]; then
+                ROUTER_ID=""
+                ROUTER_NS=""
+        else
+                ROUTER_NS="qrouter-$ROUTER_ID"
+        fi
         # local IPTABLES="$(ip netns exec $ROUTER_NS iptables -t nat -S 2> /dev/null)"
-        local IPTABLES="$(_iptables -t nat -S 2> /dev/null)"
+        local IPTABLES
+        IPTABLES="$(_iptables -t nat -S 2> >(p_error_in))"
 
         if [ $? -ne 0 ]; then
                 p_error "failed to load rules for router $ROUTER_ID"
@@ -113,7 +143,7 @@ function wipe_rules {
                         while IFS= read -r -d ''; do
                                 CMD+=("$REPLY")
                         done < <(xargs printf '%s\0' <<< "$RULE")
-                        "${CMD[@]}" 2> /dev/null
+                        "${CMD[@]}" 2> >(p_error_in)
                 fi
         done <<< "$RULES"
 }
@@ -138,14 +168,14 @@ function setup_rules {
 
         # Create the new rules
         # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
-        _iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
+        _iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
         if [ $? -ne 0 ]; then
                 return 1
         fi
 
         for S in "${SOURCE[@]}"; do
                 # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
-                _iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
+                _iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
                 if [ $? -ne 0 ]; then
                         return 1
                 fi
@@ -191,6 +221,7 @@ function monitor_routers {
 
                         wipe_rules
                         setup_rules
+                        [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
                 fi
         done
 }
@@ -219,6 +250,7 @@ function setup {
                 fi
                 wipe_rules
                 setup_rules
+                [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
         done
 }
 
