@@ -14,9 +14,12 @@ PERIOD=60
 NETS=( )
 # File in which the log will appear (appart from stdout)
 LOGFILE=/var/log/anetcon/anetcon.log
+# Chain in which to join anetcon (POSTROUTING should be fine in most cases)
+CHAIN_TO_JOIN=POSTROUTING
 
 # The content of the iptables from the router that is being analized
 IPTABLES_ROUTER=
+IPTABLES_LINKS=
 # The networks that should be monitorized for the router that is being analized
 EXPECTED_NETS=( )
 # The current router that is being analized
@@ -99,12 +102,14 @@ function load_rules {
                 p_error "failed to load rules for router $ROUTER_ID"
 
                 IPTABLES_ROUTER=
+                IPTABLES_LINKS=
                 EXPECTED_NETS=( )
                 return 1
         fi
 
         p_debug "rules for router $ROUTER_ID successfully loaded"
-        IPTABLES_ROUTER="$(echo "$IPTABLES" | grep '\[ANETCON\]')"
+        IPTABLES_ROUTER="$(echo "$IPTABLES" | grep '^-A anetcon')"
+        IPTABLES_LINKS="$(echo "$IPTABLES" | grep -- '-j anetcon')"
         EXPECTED_NETS=( $(get_nets) )
         return 0
 }
@@ -134,18 +139,27 @@ function wipe_rules {
 
         p_debug "wiping rules for router $ROUTER_ID"
 
-        # Remove all rules for that router (those loaded by load_rules)
-        RULES="$(echo "$IPTABLES_ROUTER" | sed 's/^-A/-D/g')"
-        while read RULE; do
-                if [ "$RULE" != "" ]; then
-                        # CMD=( ip netns exec "$ROUTER_NS" iptables -t nat )
-                        CMD=( _iptables -t nat )
-                        while IFS= read -r -d ''; do
-                                CMD+=("$REPLY")
-                        done < <(xargs printf '%s\0' <<< "$RULE")
-                        "${CMD[@]}" 2> >(p_error_in)
-                fi
-        done <<< "$RULES"
+        # Remove all rules for that router that link to our chain
+        # * this could be replaced by the iptables -D table -j anetcon
+        # RULES="$(echo "$IPTABLES_LINKS" | sed 's/^-A/-D/g')"
+        # while read RULE; do
+        #         if [ "$RULE" != "" ]; then
+        #                 # CMD=( ip netns exec "$ROUTER_NS" iptables -t nat )
+        #                 CMD=( _iptables -t nat )
+        #                 while IFS= read -r -d ''; do
+        #                         CMD+=("$REPLY")
+        #                 done < <(xargs printf '%s\0' <<< "$RULE")
+        #                 "${CMD[@]}" 2> >(p_error_in)
+        #         fi
+        # done <<< "$RULES"
+
+        # Remove the jumps to our rules
+        while _iptables -t nat -D "$CHAIN_TO_JOIN" -j anetcon 2> /dev/null; do
+                true
+        done
+
+        _iptables -t nat -F anetcon
+        _iptables -t nat -X anetcon
 }
 
 # Sets the iptables to start logging the start of new connections (this function relies on a previous call to load_rules)
@@ -166,16 +180,19 @@ function setup_rules {
                 SOURCE=( "" )
         fi
 
+        _iptables -t nat -N anetcon
+        _iptables -t nat -I "$CHAIN_TO_JOIN" -j anetcon
+
         # Create the new rules
         # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
-        _iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
+        _iptables -t nat -I anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
         if [ $? -ne 0 ]; then
                 return 1
         fi
 
         for S in "${SOURCE[@]}"; do
                 # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
-                _iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
+                _iptables -t nat -I anetcon $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
                 if [ $? -ne 0 ]; then
                         return 1
                 fi
@@ -186,6 +203,7 @@ function setup_rules {
 # Function that checks that the rules for one router have been properly set (and they have not been changed)
 #       * at this point the rules are not inspected in depth; the only criteria is to have the appropriate amount of rules, depending on the number of networks to monitor
 function check_rules {
+        return 0
         local SOURCE=( )
         local S
         local NET
@@ -219,7 +237,7 @@ function monitor_routers {
                 if ! check_rules; then
                         p_error "rules for router $ROUTER have changed... updating"
 
-                        wipe_rules
+                        # wipe_rules
                         setup_rules
                         [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
                 fi
@@ -248,7 +266,7 @@ function setup {
                         p_error "failed to load rules for router $ROUTER"
                         continue
                 fi
-                wipe_rules
+                # wipe_rules
                 setup_rules
                 [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
         done
