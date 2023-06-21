@@ -117,14 +117,19 @@ function load_rules {
 # Obtains the list of networks to be monitorized for one router
 function get_nets {
         local READNETS= VALIDNETS=
+        local ROUTER="$ROUTER_ID"
+        if [ "$ROUTER" == "" ]; then
+                ROUTER="default"
+        fi
+
         for N in "${NETS[@]}"; do
                 if [ "$READNETS" != "" ]; then
-                        p_debug "found networks $N to monitor in router $ROUTER_ID"
+                        p_debug "found networks $N to monitor in router $ROUTER"
 
                         VALIDNETS="$N"
                         break
                 fi
-                if [ "$N" == "$ROUTER_ID" ]; then
+                if [ "$N" == "$ROUTER" ]; then
                         READNETS=1
                 fi
         done
@@ -185,14 +190,14 @@ function setup_rules {
 
         # Create the new rules
         # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
-        _iptables -t nat -I anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
+        _iptables -t nat -A anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
         if [ $? -ne 0 ]; then
                 return 1
         fi
 
         for S in "${SOURCE[@]}"; do
                 # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
-                _iptables -t nat -I anetcon $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
+                _iptables -t nat -A anetcon $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
                 if [ $? -ne 0 ]; then
                         return 1
                 fi
@@ -277,6 +282,9 @@ trap cleanup EXIT
 
 # Prepare the rules
 setup
+
+# Enable logging for all namespaces
+echo 1 > /proc/sys/net/netfilter/nf_log_all_netns
 
 # Start monitoring
 while true; do
