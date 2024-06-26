@@ -7,7 +7,7 @@
 # DEBUG: anything different than empty value sets the debug mode
 DEBUG=
 # Space separated list of id routers to be monitorized (id can be obtained from openstack router list)
-ROUTERS=( default )
+NAMESPACES=( default )
 # Monitorization period to check if the iptables routes have been modified
 PERIOD=60
 # List of networks to be monitorized for each router (the syntax is "<router id>" "<space separated list of network using cidr notation>")
@@ -18,8 +18,7 @@ LOGFILE=/var/log/anetcon/anetcon.log
 CHAIN_TO_JOIN=POSTROUTING
 
 # The content of the iptables from the router that is being analized
-IPTABLES_ROUTER=
-IPTABLES_LINKS=
+IPTABLES_NAMESPACE=( )
 # The networks that should be monitorized for the router that is being analized
 EXPECTED_NETS=( )
 # The current router that is being analized
@@ -74,62 +73,62 @@ if [ -e /etc/anetcon.conf ]; then
 fi
 
 function _iptables {
-        if [ "$ROUTER_ID" == "" ]; then
-                iptables "$@"
+        if [ "$CURRENT_NS" == "" ]; then
+                iptables -t nat "$@"
                 return $?
         else
-                ip netns $ROUTER_NS exec iptables "$@"
+                ip netns exec $CURRENT_NS iptables -t nat "$@"
                 return $?
         fi
 }
 
 # Load the iptables rules for one router, in IPTABLES_ROUTER var, and the EXPECTED_NETS for that router
 function load_rules {
-        p_debug "loading rules for router $1"
+        local NAMESPACE="$1"
+        p_debug "loading rules for namespace $NAMESPACE"
 
-        ROUTER_ID="$1"
-        if [ "$ROUTER_ID" == "default" ]; then
-                ROUTER_ID=""
-                ROUTER_NS=""
-        else
-                ROUTER_NS="qrouter-$ROUTER_ID"
+        if [ "$NAMESPACE" == "" ]; then
+                NAMESPACE="default"
         fi
-        # local IPTABLES="$(ip netns exec $ROUTER_NS iptables -t nat -S 2> /dev/null)"
+
+        if [ "$NAMESPACE" == "default" ]; then
+                CURRENT_NS=""
+        else
+                CURRENT_NS="$NAMESPACE"
+        fi
         local IPTABLES
-        IPTABLES="$(_iptables -t nat -S 2> >(p_error_in))"
+        IPTABLES="$(_iptables -S 2> >(p_error_in))"
 
         if [ $? -ne 0 ]; then
-                p_error "failed to load rules for router $ROUTER_ID"
+                p_error "failed to load rules for namespace $NAMESPACE"
 
-                IPTABLES_ROUTER=
-                IPTABLES_LINKS=
+		IPTABLES_NAMESPACE=( )
                 EXPECTED_NETS=( )
                 return 1
         fi
 
-        p_debug "rules for router $ROUTER_ID successfully loaded"
-        IPTABLES_ROUTER="$(echo "$IPTABLES" | grep '^-A anetcon')"
-        IPTABLES_LINKS="$(echo "$IPTABLES" | grep -- '-j anetcon')"
-        EXPECTED_NETS=( $(get_nets) )
+        p_debug "rules for namespace $NAMESPACE successfully loaded"
+	IPTABLES_NAMESPACE=()
+	local RULE
+	while read RULE; do
+		IPTABLES_NAMESPACE+=("$RULE")
+	done <<< "$(echo "$IPTABLES" | grep ' anetcon')"
+        EXPECTED_NETS=( $(get_nets "$NAMESPACE") )
         return 0
 }
 
-# Obtains the list of networks to be monitorized for one router
+# Obtains the list of networks to be monitorized for one namespace
 function get_nets {
         local READNETS= VALIDNETS=
-        local ROUTER="$ROUTER_ID"
-        if [ "$ROUTER" == "" ]; then
-                ROUTER="default"
-        fi
+        local NAMESPACE="$1"
 
         for N in "${NETS[@]}"; do
                 if [ "$READNETS" != "" ]; then
-                        p_debug "found networks $N to monitor in router $ROUTER"
-
+                        p_debug "found networks $N to monitor for namespace $NAMESPACE"
                         VALIDNETS="$N"
                         break
                 fi
-                if [ "$N" == "$ROUTER" ]; then
+                if [ "$N" == "$NAMESPACE" ]; then
                         READNETS=1
                 fi
         done
@@ -138,40 +137,22 @@ function get_nets {
 
 # Deletes the iptables rules associated to one router (this funcion relies on a previous call to load_rules)
 function wipe_rules {
-        local RULE
-        local CMD
-        local RULES
-
-        p_debug "wiping rules for router $ROUTER_ID"
-
-        # Remove all rules for that router that link to our chain
-        # * this could be replaced by the iptables -D table -j anetcon
-        # RULES="$(echo "$IPTABLES_LINKS" | sed 's/^-A/-D/g')"
-        # while read RULE; do
-        #         if [ "$RULE" != "" ]; then
-        #                 # CMD=( ip netns exec "$ROUTER_NS" iptables -t nat )
-        #                 CMD=( _iptables -t nat )
-        #                 while IFS= read -r -d ''; do
-        #                         CMD+=("$REPLY")
-        #                 done < <(xargs printf '%s\0' <<< "$RULE")
-        #                 "${CMD[@]}" 2> >(p_error_in)
-        #         fi
-        # done <<< "$RULES"
+        p_debug "wiping rules for namespace $CURRENT_NS"
 
         # Remove the jumps to our rules
-        while _iptables -t nat -D "$CHAIN_TO_JOIN" -j anetcon 2> /dev/null; do
+        while _iptables -D "$CHAIN_TO_JOIN" -j anetcon 2> /dev/null; do
                 true
         done
 
-        _iptables -t nat -F anetcon
-        _iptables -t nat -X anetcon
+        _iptables -F anetcon
+        _iptables -X anetcon
 }
 
 # Sets the iptables to start logging the start of new connections (this function relies on a previous call to load_rules)
-function setup_rules {
+function create_rules {
         wipe_rules
 
-        p_info "creating rules for router $ROUTER_ID"
+        p_info "creating rules for namespace $CURRENT_NS"
 
         local SOURCE=( )
         local S
@@ -185,19 +166,17 @@ function setup_rules {
                 SOURCE=( "" )
         fi
 
-        _iptables -t nat -N anetcon
-        _iptables -t nat -I "$CHAIN_TO_JOIN" -j anetcon
+        _iptables -N anetcon
+        _iptables -I "$CHAIN_TO_JOIN" -j anetcon
 
         # Create the new rules
-        # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> /dev/null
-        _iptables -t nat -A anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
+        _iptables -A anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] " 2> >(p_error_in)
         if [ $? -ne 0 ]; then
                 return 1
         fi
 
         for S in "${SOURCE[@]}"; do
-                # ip netns exec $ROUTER_NS iptables -t nat -I neutron-l3-agent-snat $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] "
-                _iptables -t nat -A anetcon $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
+                _iptables -A anetcon $S -p tcp -m tcp -m state --state NEW  -m conntrack ! --ctstate DNAT  -j LOG --log-prefix "[ANETCON] [NAT] " 2> >(p_error_in)
                 if [ $? -ne 0 ]; then
                         return 1
                 fi
@@ -206,88 +185,104 @@ function setup_rules {
 }
 
 # Function that checks that the rules for one router have been properly set (and they have not been changed)
-#       * at this point the rules are not inspected in depth; the only criteria is to have the appropriate amount of rules, depending on the number of networks to monitor
 function check_rules {
-        return 0
-        local SOURCE=( )
-        local S
+        p_debug "checking rules for namespace $CURRENT_NS"
+
         local NET
-
-        p_debug "checking rules for router $ROUTER_ID"
-
-        local NETCOUNT="${#EXPECTED_NETS[@]}"
-        if ((NETCOUNT == 0)); then
-                NETCOUNT=1
+        local EXPECTED_RULES=(
+                "-N anetcon"
+                "-A $CHAIN_TO_JOIN -j anetcon"
+                '-A anetcon -p tcp -m tcp -m state --state NEW -m conntrack --ctstate DNAT -j LOG --log-prefix "[ANETCON] [FLOAT] "'
+        )
+        if ((${#EXPECTED_NETS[@]} > 0)); then
+                for NET in "${EXPECTED_NETS[@]}"; do
+                        EXPECTED_RULES+=('-A anetcon -s $NET -p tcp -m tcp -m state --state NEW -m conntrack ! --ctstate DNAT -j LOG --log-prefix "[ANETCON] [NAT] "')
+                done
+        else
+                EXPECTED_RULES+=('-A anetcon -p tcp -m tcp -m state --state NEW -m conntrack ! --ctstate DNAT -j LOG --log-prefix "[ANETCON] [NAT] "')
         fi
 
-        local RULE_COUNT="$(echo "$IPTABLES_ROUTER" | wc -l)"
-        local EXPECTED_RULES=$((1 + NETCOUNT))
-        if ((RULE_COUNT!=EXPECTED_RULES)); then
-                p_debug "number of rules for router $ROUTER_ID is not the expected"
-                return 1
-        fi
+        p_debug "expected rules for namespace $CURRENT_NS: ${EXPECTED_RULES[@]}"
+        p_debug "actual rules: ${IPTABLES_NAMESPACE[@]}"
+
+        local RULE E_RULE FOUND
+        for RULE in "${EXPECTED_RULES[@]}"; do
+		FOUND=false
+		for EXISTING_RULE in "${IPTABLES_NAMESPACE[@]}"; do
+			if [ "$RULE" == "$EXISTING_RULE" ]; then
+				p_debug "rule $RULE found"
+				FOUND=true
+				break;
+			fi
+		done
+		if [ "$FOUND" == "false" ]; then
+			p_debug "rule $RULE not found"
+			return 1
+		fi
+	done
         return 0
 }
 
 # Function that monitors that the routes for each router are fine. If not, the rules for that router are wiped an set back again.
-function monitor_routers {
-        local ROUTER
-        for ROUTER in ${ROUTERS[@]}; do
-                p_debug "monitoring router $ROUTER"
+function monitor_namespaces {
+        local NAMESPACE
+        for NAMESPACE in ${VALID_NAMESPACES[@]}; do
+                p_debug "monitoring namespace $NAMESPACE"
 
-                if ! load_rules "$ROUTER"; then
-                        p_error "failed to load rules for router $ROUTER"
+                if ! load_rules "$NAMESPACE"; then
+                        p_error "failed to load rules for namespace $NAMESPACE"
                         continue
                 fi
                 if ! check_rules; then
-                        p_error "rules for router $ROUTER have changed... updating"
+                        p_error "rules for namespace $CURRENT_NS have changed... updating"
 
-                        # wipe_rules
-                        setup_rules
-                        [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
+                        create_rules
+                        [ $? -ne 0 ] && p_error "failed to setup rules for namespace $NAMESPACE"
                 fi
         done
 }
 
 # Function that removes any rule for any router (this is intended for finalizing the service)
 function cleanup {
-        local ROUTER
-        for ROUTER in ${ROUTERS[@]}; do
-                p_info "cleaning up rules for router $ROUTER"
-                if ! load_rules "$ROUTER"; then
-                        p_error "failed to load rules for router $ROUTER"
+        local NAMESPACE
+        for NAMESPACE in ${VALID_NAMESPACES[@]}; do
+                p_info "cleaning up rules for namespace $NAMESPACE"
+                if ! load_rules "$NAMESPACE"; then
+                        p_error "failed to load rules for namespace $NAMESPACE"
                         continue
                 fi
                 wipe_rules
         done
 }
 
-# Function that adds the rules for any router (this is intended for starting the service)
-function setup {
-        local ROUTER
-        for ROUTER in ${ROUTERS[@]}; do
-                p_info "setting up rules for router $ROUTER"
-                if ! load_rules "$ROUTER"; then
-                        p_error "failed to load rules for router $ROUTER"
-                        continue
-                fi
-                # wipe_rules
-                setup_rules
-                [ $? -ne 0 ] && p_error "failed to setup rules for router $ROUTER"
-        done
-}
-
 # In case that the application is finalized, call the cleanup function
 trap cleanup EXIT
-
-# Prepare the rules
-setup
 
 # Enable logging for all namespaces
 echo 1 > /proc/sys/net/netfilter/nf_log_all_netns
 
+# If the namespaces are set to discover, then we will discover the namespaces
+function valid_namespaces {
+        local NAMESPACE EXISTING_NAMESPACE
+        local EXISTING_NAMESPACES=( $(ip netns | cut -d " " -f 1) )
+        VALID_NAMESPACES=( )
+
+        for NAMESPACE in "${NAMESPACES[@]}"; do
+		if [ "$NAMESPACE" == "default" ]; then
+			VALID_NAMESPACES+=( "default" )
+		else
+			for EXISTING_NAMESPACE in "${EXISTING_NAMESPACES[@]}"; do
+        	        	VALID_NAMESPACES+=( $(echo "$EXISTING_NAMESPACE" | grep "$NAMESPACE") )
+			done
+		fi
+        done
+	p_debug "found namespaces ${VALID_NAMESPACES[@]}"
+}
+
 # Start monitoring
 while true; do
-        monitor_routers
+        valid_namespaces
+        monitor_namespaces
+	p_debug "sleeping $PERIOD"
         sleep $PERIOD
 done
