@@ -19,3 +19,9 @@ mkdir -p "$(fixPath "$INSTALL_FOLDER/var/log/anetcon")"
 mkdir -p "$(fixPath "$INSTALL_FOLDER/var/lib/anetcon")"
 chown syslog:adm "$(fixPath "$INSTALL_FOLDER/var/log/anetcon")"
 chmod +x "$(fixPath "$INSTALL_FOLDER/usr/sbin/anetcon.sh")"
+
+if [ "$INSTALL_FOLDER" == "/" ]; then
+	systemctl daemon-reload
+	systemctl enable anetcon
+	systemctl start anetcon
+fi
