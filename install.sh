@@ -1,12 +1,13 @@
 #!/bin/bash
 INSTALL_FOLDER=/
 function fixPath() {
-	local RESULT="${1//\/\///}"
-	if [ "$RESULT" != "$1" ]; then
-		fixPath $RESULT
-	else
-		echo $RESULT
-	fi
+	# local RESULT="${1//\/\///}"
+	# if [ "$RESULT" != "$1" ]; then
+	# 	fixPath $RESULT
+	# else
+	# 	echo $RESULT
+	# fi
+	echo $1 | tr -s '/'
 }
 
 # Copy the files
