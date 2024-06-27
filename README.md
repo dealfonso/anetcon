@@ -144,3 +144,7 @@ The rest of options are for advanced users and should not be touched if you do n
 
 - `CHAIN_NAME`: is the name of the iptables chain to use by ANetCon. The default value is `anetcon`, but you can change it if you need.
 - `LOG_PREFIX`: is the prefix for the log messages in the iptables file. It MUST coincide with the content in file `rsyslog.d/30-anetcon.conf` in order to be able to filter the messages in the log file and put it in the right file. Moreover, the maximum size of a log message is 29 chars. If the resulting message prefix is longer, it will be truncated and so the log message will not be properly identified which may result in ANETCON not working properly.
+
+## License
+
+ANetCon is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.

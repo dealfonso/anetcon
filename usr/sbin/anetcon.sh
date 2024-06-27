@@ -1,9 +1,45 @@
 #!/bin/bash
+#
+#    Copyright 2024, Carlos A. <https://github.com/dealfonso>
+#
+#    Licensed under the Apache License, Version 2.0 (the "License");
+#    you may not use this file except in compliance with the License.
+#    You may obtain a copy of the License at
+#
+#        http://www.apache.org/licenses/LICENSE-2.0
+#
+#    Unless required by applicable law or agreed to in writing, software
+#    distributed under the License is distributed on an "AS IS" BASIS,
+#    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#    See the License for the specific language governing permissions and
+#    limitations under the License.
+#
+
+function usage {
+        cat <<EOF
+
+Usage: $0 [options]
+
+Options:
+  -h, --help            Show this help message and exit
+  -V, --version         Prints the version of the script and exit
+  -v, --verbose         Enable debug mode
+  -l, --log-file        File in which the log will appear (appart from stdout)
+  -p, --period          Monitorization period to check if the iptables routes have been modified
+  -n, --namespace       Space separated list of id routers to be monitorized (id can be obtained from openstack router list)
+  -c, --config-file     Configuration file
+
+This script is intended to monitor the iptables rules of a router in OpenStack. 
+
+EOF
+}
 
 #
 # Default values for the configuration files
 #
 
+# Version of this script
+VERSION=1.0.0
 # DEBUG: anything different than empty value sets the debug mode
 DEBUG=
 # Space separated list of id routers to be monitorized (id can be obtained from openstack router list)
@@ -14,6 +50,8 @@ PERIOD=60
 NETS=( )
 # File in which the log will appear (appart from stdout)
 LOGFILE=/var/log/anetcon/anetcon.log
+# Configuration file
+CONFIG_FILE=/etc/anetcon.conf
 # Chain in which to join anetcon (POSTROUTING should be fine in most cases)
 CHAIN_TO_JOIN=POSTROUTING
 # The content of the iptables from the router that is being analized
@@ -35,6 +73,8 @@ LOG_NAMESPACE_HASH=true
 # File to store the hash of the namespaces to ease the identification of the logs
 NAMESPACE_HASH_FILE=/var/lib/anetcon/namespace.hash
 
+# Some utility functions
+
 # Calculate the hash of a string with a given number of digits
 function hash {
         local INPUT="$1"
@@ -43,7 +83,6 @@ function hash {
         echo -n "$INPUT" | md5sum | cut -d " " -f 1 | cut -c 1-$DIGITS
 }
 
-# Some utility functions
 function p_info {
         local TS=$(date +%F_%T | tr ':' '.')
         local OUTPUT="$@"
@@ -83,12 +122,69 @@ function p_error_in {
         [ "$LOGFILE" != "" ] && echo "$TS - [error] - $OUTPUT" >> "$LOGFILE"
 }
 
+# First we'll look for a config file
+ARGUMENTS=( "$@" )
+
+function parse_arguments {
+        for ((i=0; i<${#ARGUMENTS[@]}; i++)); do
+                case "${ARGUMENTS[$i]}" in
+                        -V|--version)
+                                echo "$VERSION"
+                                exit 0
+                                ;;
+                        -h|--help)
+                                usage
+                                exit 0
+                                ;;
+                        -v|--verbose)
+                                DEBUG=true;;
+                        -l|--log-file)
+                                i=$((i+1))
+                                LOGFILE="${ARGUMENTS[$i]}";;
+                        -p|--period)
+                                i=$((i+1))
+                                PERIOD="${ARGUMENTS[$i]}";;
+                        -n|--namespace)
+                                i=$((i+1))
+                                if [ "$CUSTOM_NAMESPACES" == "true" ]; then
+                                        NAMESPACES+=( "${ARGUMENTS[$i]}" )
+                                else
+                                        NAMESPACES=( "${ARGUMENTS[$i]}" )
+                                        CUSTOM_NAMESPACES=true
+                                fi;;
+                        -c|--config-file)
+                                i=$((i+1))
+                                CONFIG_FILE="${ARGUMENTS[$i]}";;
+                        *)
+                                echo "Unknown option ${ARGUMENTS[$i]}"
+                                usage
+                                exit 1
+                                ;;        
+                esac
+        done
+}
+
+# we'll parse the arguments to get the configuration file
+parse_arguments
+
 # Load the configuration file (if exists)
-if [ -e /etc/anetcon.conf ]; then
-        . /etc/anetcon.conf
+if [ -e "$CONFIG_FILE" ]; then
+        . "$CONFIG_FILE"
         if [ $? -ne 0 ]; then
                 p_error "failed to load configuration"
+                exit 1
         fi
+else
+        p_info "configuration file $CONFIG_FILE not found"
+fi
+
+# we'll parse the arguments again to give more priority to the command line arguments
+parse_arguments
+
+if ! [[ "$PERIOD" =~ ^[0-9]+$ ]]; then
+        echo "Period must be a number"
+        usage
+        exit 1
 fi
 
 # Wrapper to iptables that allows to execute the command in the current namespace (if any)
@@ -297,12 +393,6 @@ function cleanup {
         done
 }
 
-# In case that the application is finalized, call the cleanup function
-trap cleanup EXIT
-
-# Enable logging for all namespaces
-echo 1 > /proc/sys/net/netfilter/nf_log_all_netns
-
 # If the namespaces are set to discover, then we will discover the namespaces
 function valid_namespaces {
         local NAMESPACE EXISTING_NAMESPACE
@@ -320,6 +410,12 @@ function valid_namespaces {
         done
 	p_debug "found namespaces ${VALID_NAMESPACES[@]}"
 }
+
+# In case that the application is finalized, call the cleanup function
+trap cleanup EXIT
+
+# Enable logging for all namespaces
+echo 1 > /proc/sys/net/netfilter/nf_log_all_netns
 
 # Start monitoring
 while true; do
