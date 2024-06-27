@@ -4,23 +4,18 @@ ANetCon is a set of scripts that audit the network connections of a system in an
 
 ## Installing
 
-To install ANetCon, you need to clone the repository and either the install script:
+To install ANetCon, you need to clone the repository manually copy the files to the corresponding locations (as root):
 
 ```bash
-$ make install
-```
-
-or manually copy the files to the corresponding locations
-
-```bash
-$ cp etc/logrotate.d/anetcon /etc/logrotate.d/
-$ cp etc/rsyslog.d/30-anetcon.conf /etc/rsyslog.d/
-$ cp etc/systemd/system/anetcon.service /etc/systemd/system/
-$ cp etc/anetcon.conf /etc/
-$ cp usr/sbin/anetcon.sh /usr/sbin/
-$ mkdir -p /var/log/anetcon
-$ chown syslog:adm /var/log/anetcon
-$ chmod +x /usr/sbin/anetcon.sh
+cp etc/logrotate.d/anetcon /etc/logrotate.d/
+cp etc/rsyslog.d/30-anetcon.conf /etc/rsyslog.d/
+cp etc/systemd/system/anetcon.service /etc/systemd/system/
+cp etc/anetcon.conf /etc/
+cp usr/sbin/anetcon.sh /usr/sbin/
+mkdir -p /var/log/anetcon
+mkdir -p /var/lib/anetcon
+chown syslog:adm /var/log/anetcon
+chmod +x /usr/sbin/anetcon.sh
 ```
 
 Then you need to enable the service:
@@ -107,7 +102,45 @@ NAMESPACES=( "^qrouter-.*$" )
 #NETS=( "qrouter-a4fadad3-e529-4329-a086-010b84363596" "10.0.0.0/8 192.168.1.1/24" )
 
 # Period of checks for changes in the namespace. Anetcon will watch for the rules and will restore them in case that they are wiped
-PERIOD=60
+PERIOD=30
+
+##########################################################################################################################
+#
+# WARNING ZONE:
+#
+#   from here on, the configuration is for advanced users. Please, do not touch if you do not know what you are doing
+#
+##########################################################################################################################
+
+# The name of the iptables chain for anetcon (i.e. it will be issued a "iptables -t nat -N <CHAIN_NAME>" command)
+#   (*) please do not touch if you do not know what you are doing
+# CHAIN_NAME=anetcon
+
+# The prefix for the log messages in the iptables file. It MUST coincide with the content in file 'rsyslog.d/30-anetcon.conf' in order
+#   to be able to filter the messages in the log file and put it in the right file
+#   (*) please do not touch if you do not know what you are doing
+#   (*) WARNING: have in mind that the final log prefix will be "<LOG_PREFIX><LOG_PREFIX_DNAT|LOG_PREFIX_OTHER><LOG_NAMESPACE_HASH> ",
+#                and the maximum size of a log message is 29 chars. If the resulting message is longer, it will be truncated and so
+#                the log message will not be properly identified which may result in ANETCON not working properly
+# LOG_PREFIX="[ANETCON]"
+# LOG_PREFIX_DNAT="[D]"
+# LOG_PREFIX_OTHER="[X]"
+
+# Whether to include a 10 chars hash of the namespace in the log messages so each namespace can be identified (they are 10 chars
+#   because the hash will be [<8-digit hash>]).
+#  (*) true: include the hash; <any other value>: do not include the hash
+# LOG_NAMESPACE_HASH=true
+
+# File to store the hash of the namespaces to ease the identification of the logs
+#   - if empty value, the hash will not be stored
+#   - the path is assumed to exist and be writable by the user that runs anetcon
+#   (*) please do not touch if you do not know what you are doing
+# NAMESPACE_HASH_FILE=/var/lib/anetcon/namespace.hash
 ```
 
 > It is also possible to enable the debug mode by setting the variable `DEBUG` to `true`, to get a lot more information during the execution of the script. And it is also possible to set the period of checks for changes in the namespace by setting the variable `PERIOD` to the number of seconds between checks.
+
+The rest of options are for advanced users and should not be touched if you do not know what you are doing. For example:
+
+- `CHAIN_NAME`: is the name of the iptables chain to use by ANetCon. The default value is `anetcon`, but you can change it if you need.
+- `LOG_PREFIX`: is the prefix for the log messages in the iptables file. It MUST coincide with the content in file `rsyslog.d/30-anetcon.conf` in order to be able to filter the messages in the log file and put it in the right file. Moreover, the maximum size of a log message is 29 chars. If the resulting message prefix is longer, it will be truncated and so the log message will not be properly identified which may result in ANETCON not working properly.

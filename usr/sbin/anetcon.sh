@@ -32,6 +32,8 @@ LOG_PREFIX_OTHER="[X]"
 # Whether to include a hash of the namespace in the log messages so each namespace can be identified
 #  (*) true: include the hash; <any other value>: do not include the hash
 LOG_NAMESPACE_HASH=true
+# File to store the hash of the namespaces to ease the identification of the logs
+NAMESPACE_HASH_FILE=/var/lib/anetcon/namespace.hash
 
 # Calculate the hash of a string with a given number of digits
 function hash {
@@ -116,6 +118,19 @@ function load_rules {
                 CURRENT_NS="$NAMESPACE"
                 if [ "$LOG_NAMESPACE_HASH" == "true" ]; then
                         CURRENT_NS_LOGHASH="[$(hash "$NAMESPACE")]"
+			if [ "$NAMESPACE_HASH_FILE" != "" ]; then
+				local ORIGINAL_CONTENT="$(cat "$NAMESPACE_HASH_FILE" 2> /dev/null)"
+				if [ $? -ne 0 ]; then
+					p_error "failed to read hash file $NAMESPACE_HASH_FILE"
+				else
+					local NEW_CONTENT="$(echo "${ORIGINAL_CONTENT}
+$NAMESPACE $CURRENT_NS_LOGHASH" | sort -u)"
+					if [ "$ORIGINAL_CONTENT" != "$NEW_CONTENT" ]; then
+						echo "$NEW_CONTENT" | sort -u > "$NAMESPACE_HASH_FILE"
+						[ $? -ne 0 ] && p_error "failed to write hash file $NAMESPACE_HASH_FILE"
+					fi
+				fi
+			fi
                 else
                         CURRENT_NS_LOGHASH=""
                 fi
